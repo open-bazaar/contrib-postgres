@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from math import ceil
+from time import monotonic
 lazy import asyncio
 lazy from collections.abc import Awaitable, Callable, Iterator
 lazy from typing import Any
@@ -26,6 +28,8 @@ class Config(BaseModel):
 def errors() -> Iterator[None]:
     try:
         yield
+    except psycopg.errors.QueryCanceled as error:
+        raise storage.StorageQueryTimeoutError(str(error)) from error
     except psycopg.IntegrityError as error:
         raise storage.StorageIntegrityError(str(error)) from error
     except psycopg.OperationalError as error:
@@ -39,10 +43,13 @@ class Session:
         self,
         connection: psycopg.AsyncConnection[dict[str, Any]],
         templates: Environment,
+        *,
+        query_budget: float | None = None,
     ) -> None:
         self._connection = connection
         self._templates = templates
         self.closed = False
+        self._deadline = None if query_budget is None else monotonic() + query_budget
 
     async def _execute(
         self, statement: str, parameters: tuple[storage.Scalar, ...]
@@ -51,6 +58,19 @@ class Session:
             raise storage.StorageClosedError("PostgreSQL session has closed")
         with errors():
             async with psycopg.AsyncRawCursor(self._connection) as cursor:
+                if self._deadline is not None:
+                    remaining = self._deadline - monotonic()
+                    if remaining <= 0:
+                        raise storage.StorageQueryTimeoutError(
+                            "query execution budget exceeded"
+                        )
+                    compiler = Compiler(self._templates)
+                    budget = compiler.render(
+                        "query_budget.sql.tpl", milliseconds=ceil(remaining * 1000)
+                    )
+                    await cursor.execute(
+                        budget.encode("utf-8"), tuple(compiler.parameters)
+                    )
                 await cursor.execute(statement.encode("utf-8"), parameters)
                 rows = (
                     tuple(await cursor.fetchall())
@@ -114,19 +134,54 @@ class Database(Session):
         async with self._lock:
             return await super()._execute(statement, parameters)
 
-    async def transaction[T](
-        self, operation: Callable[[storage.Session], Awaitable[T]]
+    async def read[T](
+        self,
+        operation: Callable[[storage.Session], Awaitable[T]],
+        *,
+        snapshot: bool = False,
+        query_budget: float | None = None,
     ) -> T:
         async with self._lock:
             if self.closed:
                 raise storage.StorageClosedError("PostgreSQL backend has closed")
             with errors():
                 async with self._connection.transaction():
+                    async with psycopg.AsyncRawCursor(self._connection) as cursor:
+                        statement = self._templates.get_template("read.sql.tpl").render(
+                            snapshot=snapshot
+                        )
+                        await cursor.execute(statement.encode("utf-8"))
+                    session = Session(
+                        self._connection, self._templates, query_budget=query_budget
+                    )
+                    try:
+                        return await operation(session)
+                    finally:
+                        session.closed = True
+
+    async def write[T](
+        self,
+        operation: Callable[[storage.Session], Awaitable[T]],
+        *,
+        transactional: bool = False,
+    ) -> T:
+        async with self._lock:
+            if self.closed:
+                raise storage.StorageClosedError("PostgreSQL backend has closed")
+            with errors():
+                async with AsyncExitStack() as stack:
+                    if transactional:
+                        await stack.enter_async_context(self._connection.transaction())
                     session = Session(self._connection, self._templates)
                     try:
                         return await operation(session)
                     finally:
                         session.closed = True
+
+    async def transaction[T](
+        self, operation: Callable[[storage.Session], Awaitable[T]]
+    ) -> T:
+        return await self.write(operation, transactional=True)
 
     async def apply_schema(
         self, operations: tuple[storage.SchemaOperation, ...]

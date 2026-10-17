@@ -1,4 +1,12 @@
 {% from "fragments.sql.tpl" import expression, predicate with context %}
+{% if request.ctes %}
+WITH
+{% for name, query in request.ctes.items() %}
+{{ name | identifier }} AS (
+{% with request=query %}{% include "select.sql.tpl" %}{% endwith %}
+){% if not loop.last %},{% endif %}
+{% endfor %}
+{% endif %}
 SELECT {% if request.distinct %}DISTINCT {% endif %}
 {% for alias, value in request.columns.items() %}
     {{ expression(value) }} AS {{ alias | identifier }}{% if not loop.last %},{% endif %}

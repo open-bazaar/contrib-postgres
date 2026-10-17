@@ -24,6 +24,7 @@ from bazaar_contrib_storage import (
     database,
     storage,
 )
+from bazaar_contrib_storage import models as s
 from bazaar_core import Composition, Context, Contrib, ContribEntry, ContribHub
 
 from bazaar_contrib_postgres import postgres
@@ -62,8 +63,10 @@ async def test_two_real_backends_keep_the_consumer_and_schema_unchanged(tmp_path
         db = ctx.accept(DB)
         services.append(db)
         async with ctx.accept(SCHEMA).register(module):
-            await db.insert(
-                Insert(table="switching_notes", rows=({"body": "same consumer"},))
+            await db.write(
+                lambda session: session.insert(
+                    Insert(table="switching_notes", rows=({"body": "same consumer"},))
+                )
             )
             yield
 
@@ -107,6 +110,36 @@ async def test_two_real_backends_keep_the_consumer_and_schema_unchanged(tmp_path
         ),
         roots=("consumer", "observer"),
     )
+    query = Select(
+        table="ranked",
+        ctes={
+            "ranked": Select(
+                table="switching_notes",
+                columns={
+                    "body": s.Case(
+                        when=s.Contains(
+                            expression=s.Column(name="body"), text="consumer"
+                        ),
+                        then=s.Column(name="body"),
+                        otherwise=s.Value(value=None),
+                    ),
+                    "position": s.RowNumber(
+                        partition_by=(s.Column(name="body"),),
+                        order_by=(s.Sort(expression=s.RowId()),),
+                    ),
+                    "total": s.Subquery(
+                        query=Select(
+                            table="switching_notes",
+                            columns={"count": s.Call(name="count")},
+                        )
+                    ),
+                },
+            )
+        },
+        where=s.Compare(
+            left=s.Column(name="position"), operator="=", right=s.Value(value=1)
+        ),
+    )
     async with (
         asyncio.timeout(15),
         ContribHub() as hub,
@@ -115,9 +148,11 @@ async def test_two_real_backends_keep_the_consumer_and_schema_unchanged(tmp_path
         registry = registries[-1]
         assert set(registry.names) == {"sqlite", "postgres"}
         assert services[-1] is registry.get("sqlite")
-        assert (await services[-1].select(Select(table="switching_notes")))[0][
-            "body"
-        ] == "same consumer"
+        assert (
+            await services[-1].read(
+                lambda session: session.select(query), snapshot=True, query_budget=5.0
+            )
+        )[0]["body"] == "same consumer"
         composition = composition.model_copy(
             update={
                 "entries": tuple(
@@ -130,6 +165,8 @@ async def test_two_real_backends_keep_the_consumer_and_schema_unchanged(tmp_path
         )
         await enabled.update(composition)
         assert services[-1] is registry.get("postgres")
-        assert (await services[-1].select(Select(table="switching_notes")))[0][
-            "body"
-        ] == "same consumer"
+        assert (
+            await services[-1].read(
+                lambda session: session.select(query), snapshot=True, query_budget=5.0
+            )
+        )[0]["body"] == "same consumer"

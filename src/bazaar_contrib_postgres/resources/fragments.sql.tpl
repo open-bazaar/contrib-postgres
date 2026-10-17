@@ -1,18 +1,32 @@
 {% macro expression(node) -%}
 {% if node.kind == "column" %}
     {% if node.table %}{{ node.table | identifier }}.{% endif %}{{ node.name | identifier }}
+{% elif node.kind == "row_id" %}
+    {% if node.table %}{{ node.table | identifier }}.{% endif %}ctid
 {% elif node.kind == "value" %}
     {{ bind(node.value) }}
 {% elif node.kind == "binary" %}
     ({{ expression(node.left) }} {{ node.operator }} {{ expression(node.right) }})
 {% elif node.kind == "row_number" %}
-    ROW_NUMBER() OVER (ORDER BY
+    ROW_NUMBER() OVER (
+    {% if node.partition_by %}
+        PARTITION BY {% for value in node.partition_by %}{{ expression(value) }}{{ ", " if not loop.last else "" }}{% endfor %}
+    {% endif %}
+    ORDER BY
     {% for sort in node.order_by %}
         {{ expression(sort.expression) }} {{ "DESC" if sort.descending else "ASC" }} NULLS {{ sort.nulls | upper }}{{ ", " if not loop.last else "" }}
     {% endfor %}
     )
+{% elif node.kind == "case" %}
+    CASE WHEN {{ predicate(node.when) }} THEN {{ expression(node.then) }} ELSE {{ expression(node.otherwise) }} END
+{% elif node.kind == "subquery" %}
+    ({% with request=node.query %}{% include "select.sql.tpl" %}{% endwith %})
 {% elif node.kind == "call" %}
-    {{ node.name | upper }}(
+    {% if node.name in ("max", "min") and node.arguments | length > 1 %}
+        {{ "GREATEST" if node.name == "max" else "LEAST" }}(
+    {% else %}
+        {{ node.name | upper }}(
+    {% endif %}
     {% for argument in node.arguments %}
         {{ expression(argument) }}{{ ", " if not loop.last else "" }}
     {% else %}
