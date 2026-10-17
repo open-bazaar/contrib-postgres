@@ -1,0 +1,54 @@
+[project]
+name = "bazaar-contrib-postgres"
+version = "0.3.0rc1"
+description = "PostgreSQL storage backend for Bazaar Compute Node"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.15"
+dependencies = [
+    "bazaar-core~=0.3.0rc1",
+    "bazaar-contrib-storage~=0.3.0rc1",
+    "psycopg[binary]>=3.2.0",
+    "pydantic>=2.12.0",
+    "jinja2>=3.1.6",
+]
+
+[project.urls]
+Repository = "https://github.com/open-bazaar/contrib-postgres"
+
+[project.entry-points."bazaar_compute_node.contribs"]
+postgres = "bazaar_contrib_postgres:postgres"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "bazaar-contrib-schema~=0.3.0rc1",
+    "bazaar-contrib-sqlite~=0.3.0rc1",
+    "blockbuster>=1.5.29,<1.6",
+    "pyright==1.1.414",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.9.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:anyio"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["e2e: requires an owned isolated PostgreSQL database"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.15"
+pythonPlatform = "All"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+
+[tool.ruff.lint]
+extend-select = ["ASYNC", "I"]
